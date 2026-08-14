@@ -1,0 +1,62 @@
+name: PMG Proxy Test
+
+# Manual-only. This workflow verifies that the PMG proxy is wired up correctly
+# by installing a known-clean package and a known-flagged package. It is not
+# part of normal PR CI — run it from the Actions tab after changing PMG config
+# or rotating the PMG_* secrets.
+on:
+  workflow_dispatch:
+
+jobs:
+  test-pmg-allows-clean-install:
+    name: PMG - Clean package should not be blocked
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup PMG proxy
+        uses: safedep/pmg@v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install clean package (should succeed)
+        run: npm install lodash
+
+      - name: Enforce PMG policy
+        if: always()
+        run: pmg proxy stop --fail-on-violation
+
+  test-pmg-blocks-malicious-package:
+    name: PMG - Malicious package should be blocked
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup PMG proxy
+        uses: safedep/pmg@v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install flagged test package (PMG should block this)
+        continue-on-error: true
+        run: npm install --no-cache --prefer-online safedep-test-pkg@0.1.3
+
+      # Inverted assertion: this job is GREEN when PMG records a violation.
+      # A clean exit here means PMG failed to block the flagged package.
+      - name: Verify PMG recorded a violation
+        if: always()
+        run: |
+          if pmg proxy stop --fail-on-violation; then
+            echo "::error::PMG did NOT block the flagged package - proxy is not enforcing"
+            exit 1
+          else
+            echo "PMG correctly blocked the flagged package"
+          fi

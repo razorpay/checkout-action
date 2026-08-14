@@ -10,6 +10,14 @@ jobs:
     name: Check licenses
     steps:
       - uses: actions/checkout@v2
+
+      - name: Setup PMG proxy
+        uses: safedep/pmg@v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
+
       - run: npm ci
       - name: Install licensed
         run: |
@@ -18,3 +26,7 @@ jobs:
           sudo tar -xzf licensed.tar.gz
           sudo mv licensed /usr/local/bin/licensed
       - run: licensed status
+
+      - name: Enforce PMG policy
+        if: always()
+        run: pmg proxy stop --fail-on-violation
