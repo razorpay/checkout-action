@@ -7,6 +7,9 @@ name: PMG Proxy Test
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test-pmg-allows-clean-install:
     name: PMG - Clean package should not be blocked
