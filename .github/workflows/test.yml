@@ -206,13 +206,16 @@ jobs:
           tenant-id: ${{ secrets.PMG_TENANT_ID }}
 
       # This job exists to prove checkout works through the squid service, so
-      # squid must stay the effective proxy. The job-level `https_proxy` already
-      # wins over GITHUB_ENV, but PMG also exports the uppercase spelling, which
-      # some clients prefer - pin it back to squid so the test still tests squid.
+      # squid must stay the effective proxy. PMG exports its own proxy vars via
+      # GITHUB_ENV, and the precedence between GITHUB_ENV and this job's
+      # `env:` block is not something the GitHub docs state outright - so pin
+      # BOTH spellings back to squid explicitly. That is correct either way,
+      # and does not depend on which one wins.
       - name: Restore squid as the effective proxy
         if: always()
         run: |
           echo "HTTPS_PROXY=http://squid-proxy:3128" >> "$GITHUB_ENV"
+          echo "https_proxy=http://squid-proxy:3128" >> "$GITHUB_ENV"
           echo "NO_PROXY=localhost,127.0.0.1" >> "$GITHUB_ENV"
           echo "no_proxy=localhost,127.0.0.1" >> "$GITHUB_ENV"
 
@@ -270,8 +273,9 @@ jobs:
 
       # This job asserts that checkout still works when https_proxy points at a
       # proxy that does not exist and no_proxy exempts GitHub. PMG exports its
-      # own HTTPS_PROXY, which would quietly make the broken proxy reachable and
-      # void the assertion - so pin the deliberately-broken values back. The
+      # own proxy vars, which would quietly make the broken proxy reachable and
+      # void the assertion - so pin the deliberately-broken values back, in both
+      # spellings, regardless of which source wins precedence. The
       # only addition is localhost, so `pmg proxy stop` can reach its daemon;
       # that does not weaken the GitHub bypass being tested.
       - name: Restore the deliberately-broken proxy settings
