@@ -46,6 +46,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v2
 
+      # PMG ships Linux (x86_64/arm64) binaries only, so the macOS and Windows
+      # legs skip it. This job installs no packages - PMG is wired in for
+      # uniform coverage, not because there is anything here to guard.
+      - name: Setup PMG proxy
+        if: runner.os == 'Linux'
+        uses: safedep/pmg@v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
+
+      # Keep git/LFS/submodule traffic off the MITM proxy. Ubuntu's git links
+      # against libcurl3-gnutls, which ignores SSL_CERT_FILE, so a proxied
+      # clone can fail certificate verification even though npm and curl are
+      # fine. Nothing is lost by exempting these hosts: this job installs no
+      # packages, so no package traffic is being waived. localhost is exempted
+      # so `pmg proxy stop` can reach its own daemon.
+      - name: Exempt git traffic from the PMG proxy
+        if: runner.os == 'Linux'
+        run: |
+          hosts="github.com,api.github.com,codeload.github.com,objects.githubusercontent.com,raw.githubusercontent.com,github-cloud.s3.amazonaws.com,localhost,127.0.0.1"
+          echo "NO_PROXY=$hosts" >> "$GITHUB_ENV"
+          echo "no_proxy=$hosts" >> "$GITHUB_ENV"
+
       # Basic checkout
       - name: Checkout basic
         uses: ./
@@ -147,6 +171,10 @@ jobs:
       - name: Verify basic
         run: __test__/verify-basic.sh --archive
 
+      - name: Enforce PMG policy
+        if: always() && runner.os == 'Linux'
+        run: pmg proxy stop --fail-on-violation
+
   test-proxy:
     runs-on: ubuntu-latest
     container:
@@ -163,6 +191,30 @@ jobs:
       # Clone this repo
       - name: Checkout
         uses: actions/checkout@v2
+
+      # This job runs inside alpine/git (musl, no bash), so the PMG composite
+      # action may not be able to install or execute. continue-on-error keeps
+      # that from failing the job - PMG is attempted here, and the job proceeds
+      # unchanged whether or not it comes up.
+      - name: Setup PMG proxy
+        id: pmg
+        continue-on-error: true
+        uses: safedep/pmg@v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
+
+      # This job exists to prove checkout works through the squid service, so
+      # squid must stay the effective proxy. The job-level `https_proxy` already
+      # wins over GITHUB_ENV, but PMG also exports the uppercase spelling, which
+      # some clients prefer - pin it back to squid so the test still tests squid.
+      - name: Restore squid as the effective proxy
+        if: always()
+        run: |
+          echo "HTTPS_PROXY=http://squid-proxy:3128" >> "$GITHUB_ENV"
+          echo "NO_PROXY=localhost,127.0.0.1" >> "$GITHUB_ENV"
+          echo "no_proxy=localhost,127.0.0.1" >> "$GITHUB_ENV"
 
       # Basic checkout using git
       - name: Checkout basic
@@ -186,6 +238,19 @@ jobs:
       - name: Verify basic
         run: __test__/verify-basic.sh --archive
 
+      # Tolerant teardown: pmg may never have installed in this container.
+      # No packages are installed in this job, so there is no violation to
+      # enforce - this exists to stop the daemon if it did come up.
+      - name: Enforce PMG policy
+        if: always()
+        continue-on-error: true
+        run: |
+          if command -v pmg >/dev/null 2>&1; then
+            pmg proxy stop --fail-on-violation
+          else
+            echo "pmg not available in this container - nothing to stop"
+          fi
+
   test-bypass-proxy:
     runs-on: ubuntu-latest
     env:
@@ -195,6 +260,26 @@ jobs:
       # Clone this repo
       - name: Checkout
         uses: actions/checkout@v2
+
+      - name: Setup PMG proxy
+        uses: safedep/pmg@v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
+
+      # This job asserts that checkout still works when https_proxy points at a
+      # proxy that does not exist and no_proxy exempts GitHub. PMG exports its
+      # own HTTPS_PROXY, which would quietly make the broken proxy reachable and
+      # void the assertion - so pin the deliberately-broken values back. The
+      # only addition is localhost, so `pmg proxy stop` can reach its daemon;
+      # that does not weaken the GitHub bypass being tested.
+      - name: Restore the deliberately-broken proxy settings
+        run: |
+          echo "HTTPS_PROXY=http://no-such-proxy:3128" >> "$GITHUB_ENV"
+          echo "https_proxy=http://no-such-proxy:3128" >> "$GITHUB_ENV"
+          echo "NO_PROXY=api.github.com,github.com,localhost,127.0.0.1" >> "$GITHUB_ENV"
+          echo "no_proxy=api.github.com,github.com,localhost,127.0.0.1" >> "$GITHUB_ENV"
 
       # Basic checkout using git
       - name: Checkout basic
@@ -217,3 +302,7 @@ jobs:
           path: basic
       - name: Verify basic
         run: __test__/verify-basic.sh --archive
+
+      - name: Enforce PMG policy
+        if: always()
+        run: pmg proxy stop --fail-on-violation

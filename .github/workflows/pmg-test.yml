@@ -60,3 +60,119 @@ jobs:
           else
             echo "PMG correctly blocked the flagged package"
           fi
+
+  # Compatibility probe for the `test` job in test.yml.
+  #
+  # `test` does ~12 git clones plus LFS and recursive submodule fetches. Under
+  # PMG server-mode every one of those inherits HTTPS_PROXY and hits the
+  # proxy's TLS interception. PMG advertises trust via SSL_CERT_FILE et al,
+  # but Ubuntu's git is linked against libcurl3-gnutls, and GnuTLS does not
+  # read SSL_CERT_FILE - so git may fail cert verification where npm/curl
+  # succeed. Upstream docs do not state whether non-registry hosts are
+  # MITM'd or CONNECT-tunnelled.
+  #
+  # Every probe is continue-on-error, so this job reports rather than guesses.
+  # If all probes pass, it is safe to add PMG to the ubuntu leg of `test`.
+  test-pmg-git-compatibility:
+    name: PMG - git/LFS/submodule checkout under the proxy
+    runs-on: ubuntu-latest
+    steps:
+      # Checked out before PMG so the action source is on disk regardless of
+      # whether the proxy interferes with git.
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Setup PMG proxy
+        uses: safedep/pmg@v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
+
+      - name: Show proxy and cert environment
+        run: |
+          echo "HTTP_PROXY=$HTTP_PROXY"
+          echo "HTTPS_PROXY=$HTTPS_PROXY"
+          echo "NO_PROXY=$NO_PROXY"
+          echo "SSL_CERT_FILE=$SSL_CERT_FILE"
+          echo "NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS"
+          git version
+          echo "git https backend:"
+          ldd "$(git --exec-path)/git-remote-https" 2>/dev/null | grep -iE 'curl|gnutls|ssl' || echo "  (unable to inspect)"
+
+      - name: Probe - plain git clone over HTTPS
+        id: probe_git
+        continue-on-error: true
+        run: git clone --depth 1 https://github.com/actions/checkout.git "$RUNNER_TEMP/probe-git"
+
+      - name: Probe - checkout action, basic
+        id: probe_basic
+        continue-on-error: true
+        uses: ./
+        with:
+          ref: test-data/v2/basic
+          path: basic
+
+      - name: Probe - checkout action, LFS
+        id: probe_lfs
+        continue-on-error: true
+        uses: ./
+        with:
+          repository: actions/checkout
+          ref: test-data/v2/lfs
+          path: lfs
+          lfs: true
+
+      - name: Probe - checkout action, recursive submodules
+        id: probe_submodules
+        continue-on-error: true
+        uses: ./
+        with:
+          ref: test-data/v2/submodule-ssh-url
+          path: submodules-recursive
+          submodules: recursive
+
+      # Shims `git` to a fake version so the action falls back to the REST API
+      # tarball download. GITHUB_PATH only takes effect in *subsequent* steps,
+      # and the shim breaks real git for the rest of the job - so this must be
+      # the last probe.
+      - name: Force the REST API download path
+        continue-on-error: true
+        run: __test__/override-git-version.sh
+
+      - name: Probe - checkout action, REST API fallback
+        id: probe_rest
+        continue-on-error: true
+        uses: ./
+        with:
+          ref: test-data/v2/basic
+          path: basic-rest
+
+      - name: Verdict
+        if: always()
+        run: |
+          echo "| probe                     | outcome |"
+          echo "| ------------------------- | ------- |"
+          echo "| plain git clone           | ${{ steps.probe_git.outcome }} |"
+          echo "| checkout basic            | ${{ steps.probe_basic.outcome }} |"
+          echo "| checkout LFS              | ${{ steps.probe_lfs.outcome }} |"
+          echo "| checkout submodules       | ${{ steps.probe_submodules.outcome }} |"
+          echo "| REST API override         | ${{ steps.probe_rest.outcome }} |"
+          failed=""
+          for r in "git:${{ steps.probe_git.outcome }}" \
+                   "basic:${{ steps.probe_basic.outcome }}" \
+                   "lfs:${{ steps.probe_lfs.outcome }}" \
+                   "submodules:${{ steps.probe_submodules.outcome }}" \
+                   "rest:${{ steps.probe_rest.outcome }}"; do
+            name="${r%%:*}"; outcome="${r##*:}"
+            if [ "$outcome" != "success" ]; then failed="$failed $name"; fi
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::PMG proxy breaks git traffic ($failed) - do NOT add PMG to the test job in test.yml"
+            exit 1
+          fi
+          echo "All git paths survived the PMG proxy - it is safe to add PMG to the ubuntu leg of the test job."
+
+      - name: Enforce PMG policy
+        if: always()
+        run: pmg proxy stop --fail-on-violation
