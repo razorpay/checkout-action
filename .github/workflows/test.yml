@@ -15,6 +15,13 @@ jobs:
         with:
           node-version: 12.x
       - uses: actions/checkout@v2
+      - name: Setup PMG proxy
+        id: pmg-setup
+        uses: safedep/pmg@v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
       - run: npm ci
       - run: npm run build
       - run: npm run format-check
@@ -22,6 +29,14 @@ jobs:
       - run: npm test
       - name: Verify no unstaged changes
         run: __test__/verify-no-unstaged-changes.sh
+      - name: Enforce PMG policy
+        if: always()
+        run: |
+          if [ "${{ steps.pmg-setup.outcome }}" = "success" ]; then
+            pmg proxy stop --fail-on-violation
+          else
+            pmg proxy stop || true
+          fi
 
   test:
     strategy:
@@ -132,8 +147,26 @@ jobs:
         with:
           ref: test-data/v2/basic
           path: basic
+
+      - name: Setup PMG proxy
+        id: pmg-setup
+        if: runner.os == 'Linux'
+        uses: safedep/pmg@v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
       - name: Verify basic
         run: __test__/verify-basic.sh --archive
+
+      - name: Enforce PMG policy
+        if: always() && runner.os == 'Linux'
+        run: |
+          if [ "${{ steps.pmg-setup.outcome }}" = "success" ]; then
+            pmg proxy stop --fail-on-violation
+          else
+            pmg proxy stop || true
+          fi
 
   test-proxy:
     runs-on: ubuntu-latest
